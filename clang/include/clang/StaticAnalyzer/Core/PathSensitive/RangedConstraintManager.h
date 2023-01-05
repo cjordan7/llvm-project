@@ -476,6 +476,12 @@ protected:
   //===------------------------------------------------------------------===//
 private:
   static void computeAdjustment(SymbolRef &Sym, llvm::APSInt &Adjustment);
+
+    static void computeAdjustment(SymbolRef &Sym, llvm::APSInt &Adjustment,
+                                  BinaryOperator::Opcode &ReturnOp);
+  public:
+    BinaryOperator::Opcode OperationOpcode = BO_Comma;
+
 };
 
 /// Try to simplify a given symbolic expression based on the constraints in

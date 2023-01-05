@@ -179,7 +179,10 @@ ProgramStateRef RangedConstraintManager::assumeSymRel(ProgramStateRef State,
   // in modular arithmetic is [0, 1] U [UINT_MAX-1, UINT_MAX]. It's up to
   // the subclasses of SimpleConstraintManager to handle the adjustment.
   llvm::APSInt Adjustment = WraparoundType.getZeroValue();
-  computeAdjustment(Sym, Adjustment);
+
+  BinaryOperator::Opcode ReturnOp = BO_Comma;
+  computeAdjustment(Sym, Adjustment, ReturnOp);
+  this->OperationOpcode = ReturnOp;
 
   // Convert the right-hand side integer as necessary.
   APSIntType ComparisonType = std::max(WraparoundType, APSIntType(Int));
@@ -216,9 +219,39 @@ ProgramStateRef RangedConstraintManager::assumeSymRel(ProgramStateRef State,
 
 void RangedConstraintManager::computeAdjustment(SymbolRef &Sym,
                                                 llvm::APSInt &Adjustment) {
+    BinaryOperator::Opcode ReturnOp;
+    computeAdjustment(Sym, Adjustment, ReturnOp);
+}
+
+void RangedConstraintManager::computeAdjustment(SymbolRef &Sym,
+                                                llvm::APSInt &Adjustment,
+                                                BinaryOperator::Opcode &ReturnOp) {
   // Is it a "($sym+constant1)" expression?
   if (const SymIntExpr *SE = dyn_cast<SymIntExpr>(Sym)) {
-    BinaryOperator::Opcode Op = SE->getOpcode();
+
+    BinaryOperator::Opcode Temp = SE->getOpcode();
+    ReturnOp = Temp;
+
+    BinaryOperator::Opcode Op = ReturnOp;
+    if (ReturnOp == BO_Mul) {
+      Sym = SE->getLHS();
+      Adjustment = APSIntType(Adjustment).convert(SE->getRHS());
+    }
+
+    if (Op == BO_Div) {
+      Sym = SE->getLHS();
+      Adjustment = APSIntType(Adjustment).convert(SE->getRHS());
+    }
+
+    if (Op == BO_Shr) {
+      Sym = SE->getLHS();
+      Adjustment = APSIntType(Adjustment).convert(SE->getRHS());
+    }
+    if (Op == BO_Shl) {
+      Sym = SE->getLHS();
+      Adjustment = APSIntType(Adjustment).convert(SE->getRHS());
+    }
+
     if (Op == BO_Add || Op == BO_Sub) {
       Sym = SE->getLHS();
       Adjustment = APSIntType(Adjustment).convert(SE->getRHS());

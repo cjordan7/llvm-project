@@ -1870,6 +1870,14 @@ public:
 private:
   RangeSet::Factory F;
 
+  llvm::APSInt getOverflowMul(const llvm::APSInt &Adjustment, const llvm::APSInt
+                              &ComparisonVal, const llvm::APSInt &Min, const
+                              llvm::APSInt &Max);
+
+  void DefaultCase(llvm::APSInt &Lower, llvm::APSInt &Upper,
+                   const llvm::APSInt &Adjustment,
+                   llvm::APSInt &Min, llvm::APSInt &ComparisonVal);
+
   RangeSet getRange(ProgramStateRef State, SymbolRef Sym);
   RangeSet getRange(ProgramStateRef State, EquivalenceClass Class);
   ProgramStateRef setRange(ProgramStateRef State, SymbolRef Sym,
@@ -2964,7 +2972,44 @@ RangeConstraintManager::assumeSymNE(ProgramStateRef St, SymbolRef Sym,
   if (AdjustmentType.testInRange(Int, true) != APSIntType::RTR_Within)
     return St;
 
-  llvm::APSInt Point = AdjustmentType.convert(Int) - Adjustment;
+  llvm::APSInt Point;
+
+  switch(this->OperationOpcode) {
+    case clang::BO_Mul:
+      Point = AdjustmentType.convert(Int) / Adjustment;
+      break;
+    case clang::BO_Shl:
+      // The case where Adjustment == 0 has already been treated earlier on.
+      if(Adjustment.isStrictlyPositive()) {
+        auto e = static_cast<const llvm::APInt>(Adjustment);
+        Point = AdjustmentType.convert(Int) >> e;
+      } else {
+        // This is undefined behavior
+        // Call the default case instead
+        Point = AdjustmentType.convert(Int) - Adjustment;
+      }
+      break;
+    case clang::BO_Shr:
+      // The case where Adjustment == 0 has already been treated earlier on.
+      if(Adjustment.isStrictlyPositive()) {
+        auto e = static_cast<const llvm::APInt>(Adjustment);
+        Point = AdjustmentType.convert(Int) << e;
+      } else {
+        // This is undefined behavior
+        // Call the default case instead
+        Point = AdjustmentType.convert(Int) - Adjustment;
+      }
+      break;
+    case clang::BO_Div:
+      Point = AdjustmentType.convert(Int) * Adjustment;
+      break;
+    case clang::BO_Add:
+    case clang::BO_Sub:
+    default:
+      Point = AdjustmentType.convert(Int) - Adjustment;
+  }
+
+  Point = AdjustmentType.convert(Int) - Adjustment;
   RangeSet New = getRange(St, Sym);
   New = F.deletePoint(New, Point);
 
@@ -2980,12 +3025,53 @@ RangeConstraintManager::assumeSymEQ(ProgramStateRef St, SymbolRef Sym,
   if (AdjustmentType.testInRange(Int, true) != APSIntType::RTR_Within)
     return nullptr;
 
+  llvm::APSInt AdjInt;
   // [Int-Adjustment, Int-Adjustment]
-  llvm::APSInt AdjInt = AdjustmentType.convert(Int) - Adjustment;
+  switch(this->OperationOpcode) {
+    case clang::BO_Mul:
+      AdjInt = AdjustmentType.convert(Int) / Adjustment;
+      break;
+    case clang::BO_Shl:
+      // The case where Adjustment == 0 has already been treated earlier on.
+      if(Adjustment.isStrictlyPositive()) {
+        auto e = static_cast<const llvm::APInt>(Adjustment);
+        AdjInt = AdjustmentType.convert(Int) >> e;
+      } else {
+        // This is undefined behavior
+        // Call the default case instead
+        AdjInt = AdjustmentType.convert(Int) - Adjustment;
+      }
+      break;
+    case clang::BO_Shr:
+      // The case where Adjustment == 0 has already been treated earlier on.
+      if(Adjustment.isStrictlyPositive()) {
+        auto e = static_cast<const llvm::APInt>(Adjustment);
+        AdjInt = AdjustmentType.convert(Int) << e;
+      } else {
+        // This is undefined behavior
+        // Call the default case instead
+        AdjInt = AdjustmentType.convert(Int) - Adjustment;
+      }
+      break;
+    case clang::BO_Div:
+      AdjInt = AdjustmentType.convert(Int) * Adjustment;
+      break;
+    case clang::BO_Add:
+    case clang::BO_Sub:
+    default:
+      AdjInt = AdjustmentType.convert(Int) - Adjustment;
+  }
+
   RangeSet New = getRange(St, Sym);
   New = F.intersect(New, AdjInt);
 
   return setRange(St, Sym, New);
+}
+
+void RangeConstraintManager::DefaultCase(llvm::APSInt &Lower, llvm::APSInt &Upper, const llvm::APSInt &Adjustment,
+                 llvm::APSInt &Min, llvm::APSInt &ComparisonVal) {
+  Lower = Min - Adjustment;
+  Upper = ComparisonVal - Adjustment;
 }
 
 RangeSet RangeConstraintManager::getSymLTRange(ProgramStateRef St,
@@ -3009,9 +3095,61 @@ RangeSet RangeConstraintManager::getSymLTRange(ProgramStateRef St,
   if (ComparisonVal == Min)
     return F.getEmptySet();
 
-  llvm::APSInt Lower = Min - Adjustment;
-  llvm::APSInt Upper = ComparisonVal - Adjustment;
-  --Upper;
+  llvm::APSInt Max = AdjustmentType.getMaxValue();
+
+  llvm::APSInt Lower;
+  llvm::APSInt Upper;
+  switch(this->OperationOpcode) {
+      // BO_Rem
+    case clang::BO_Mul:
+      if(Adjustment > 0) {
+        // Calculate potential Overflow
+        Upper = ComparisonVal/Adjustment;
+        Lower = Max/Adjustment + 1;
+        --Upper;
+      } else {
+        Upper = ComparisonVal/Adjustment;
+        Lower = Min/Adjustment;
+        --Lower;
+      }
+      break;
+    case clang::BO_Shl:
+      DefaultCase(Lower, Upper, Adjustment, Min, ComparisonVal);
+      --Upper;
+      break;
+    case clang::BO_Shr:
+      // The case where Adjustment == 0 has already been treated earlier on.
+      if(Adjustment.isStrictlyPositive()) {
+        Lower = Min;
+        auto e = static_cast<const llvm::APInt>(Adjustment);
+        Upper = ComparisonVal << e;
+      } else {
+        // This is undefined behavior
+        // Call the default case instead
+        DefaultCase(Lower, Upper, Adjustment, Min, ComparisonVal);
+      }
+      --Upper;
+      break;
+    case clang::BO_Div: {
+      if(Adjustment > 0) {
+        // Calculate potential Overflow
+        Upper = getOverflowMul(Adjustment, ComparisonVal, Min, Max);
+        Lower = Min;
+
+        --Upper;
+      } else {
+        Lower = getOverflowMul(Adjustment, ComparisonVal, Min, Max);
+        Upper = Max;
+
+        --Lower;
+      }
+    } break;
+    case clang::BO_Add:
+    case clang::BO_Sub:
+    default:
+      DefaultCase(Lower, Upper, Adjustment, Min, ComparisonVal);
+      --Upper;
+  }
 
   RangeSet Result = getRange(St, Sym);
   return F.intersect(Result, Lower, Upper);
@@ -3046,12 +3184,86 @@ RangeSet RangeConstraintManager::getSymGTRange(ProgramStateRef St,
   if (ComparisonVal == Max)
     return F.getEmptySet();
 
-  llvm::APSInt Lower = ComparisonVal - Adjustment;
-  llvm::APSInt Upper = Max - Adjustment;
-  ++Lower;
+  llvm::APSInt Min = AdjustmentType.getMinValue();
+
+  llvm::APSInt Lower;
+  llvm::APSInt Upper;
+  switch(this->OperationOpcode) {
+    case clang::BO_Mul:
+      if(Adjustment > 0) {
+        // Calculate potential Overflow
+        Lower = ComparisonVal/Adjustment;
+        Upper = Max/Adjustment+1;
+        ++Lower;
+      } else {
+        Upper = ComparisonVal/Adjustment;
+        Lower = Min/Adjustment-1;
+        ++Upper;
+      }
+      break;
+    case clang::BO_Shl:
+      if(Adjustment.isStrictlyPositive()) {
+        auto e = static_cast<const llvm::APInt>(Adjustment);
+        Lower = ComparisonVal >> e;
+        Upper = (Max >> e) + 1;
+      }
+      ++Lower;
+      break;
+    case clang::BO_Shr:
+      // The case where Adjustment == 0 has already been treated earlier on.
+      if(Adjustment.isStrictlyPositive()) {
+        auto e = static_cast<const llvm::APInt>(Adjustment);
+        Lower = ComparisonVal << e;
+        Upper = Max;
+        ++Lower;
+      } else {
+        // This is undefined behavior
+        // Call the default case instead
+        DefaultCase(Upper, Lower, Adjustment, Max, ComparisonVal);
+        ++Lower;
+      }
+      break;
+    case clang::BO_Div: {
+      if(Adjustment > 0) {
+        // Calculate potential Overflow
+        Lower = getOverflowMul(Adjustment, ComparisonVal, Min, Max);
+        Upper = Max;
+        ++Lower;
+      } else {
+        Upper = getOverflowMul(Adjustment, ComparisonVal, Min, Max);
+        Lower = Min;
+        ++Upper;
+      }
+    } break; break;
+    case clang::BO_Add:
+    case clang::BO_Sub:
+    default:
+      DefaultCase(Upper, Lower, Adjustment, Max, ComparisonVal);
+      ++Lower;
+  }
 
   RangeSet SymRange = getRange(St, Sym);
   return F.intersect(SymRange, Lower, Upper);
+}
+
+llvm::APSInt RangeConstraintManager::getOverflowMul(const llvm::APSInt &Adjustment,
+                                                    const llvm::APSInt &ComparisonVal,
+                                                    const llvm::APSInt &Min,
+                                                    const llvm::APSInt &Max) {
+
+  llvm::APSInt a = ComparisonVal;
+  llvm::APSInt b = Adjustment;
+  llvm::APSInt MaxDivB = Max/b;
+  llvm::APSInt MinDivB = Min/b;
+    if(b > 0 && (a > MaxDivB || a < MinDivB)) {
+        return a > MaxDivB ? Max: Min;
+    }
+
+    if(b < 0 && (a < MaxDivB || a > MinDivB)) {
+        return a < MaxDivB ? Min : Max;
+    }
+
+    return ComparisonVal * Adjustment;
 }
 
 ProgramStateRef
@@ -3084,8 +3296,56 @@ RangeSet RangeConstraintManager::getSymGERange(ProgramStateRef St,
     return getRange(St, Sym);
 
   llvm::APSInt Max = AdjustmentType.getMaxValue();
-  llvm::APSInt Lower = ComparisonVal - Adjustment;
-  llvm::APSInt Upper = Max - Adjustment;
+
+  llvm::APSInt Lower;
+  llvm::APSInt Upper;
+  switch(this->OperationOpcode) {
+    case clang::BO_Mul:
+      if(Adjustment > 0) {
+        // Calculate potential Overflow
+        Lower = ComparisonVal/Adjustment;
+        Upper = Max/Adjustment;
+      } else {
+        Upper = ComparisonVal/Adjustment;
+        Lower = Min/Adjustment-1;
+      }
+      break;
+    case clang::BO_Shl:
+      if(Adjustment.isStrictlyPositive()) {
+        auto e = static_cast<const llvm::APInt>(Adjustment);
+        Lower = ComparisonVal >> e;
+        Upper = Max >> Adjustment;
+      } else {
+        DefaultCase(Upper, Lower, Adjustment, Max, ComparisonVal);
+      }
+      break;
+    case clang::BO_Shr:
+      // The case where Adjustment == 0 has already been treated earlier on.
+      if(Adjustment.isStrictlyPositive()) {
+        auto e = static_cast<const llvm::APInt>(Adjustment);
+        Lower = ComparisonVal << e;
+        Upper = Max;
+      } else {
+        // This is undefined behavior
+        // Call the default case instead
+        DefaultCase(Upper, Lower, Adjustment, Max, ComparisonVal);
+      }
+      break;
+    case clang::BO_Div: {
+      if(Adjustment > 0) {
+        // Calculate potential Overflow
+        Lower = getOverflowMul(Adjustment, ComparisonVal, Min, Max);
+        Upper = Max;
+      } else {
+        Upper = getOverflowMul(Adjustment, ComparisonVal, Min, Max);
+        Lower = Min;
+      }
+    } break;
+    case clang::BO_Add:
+    case clang::BO_Sub:
+    default:
+      DefaultCase(Upper, Lower, Adjustment, Max, ComparisonVal);
+  }
 
   RangeSet SymRange = getRange(St, Sym);
   return F.intersect(SymRange, Lower, Upper);
@@ -3121,8 +3381,56 @@ RangeConstraintManager::getSymLERange(llvm::function_ref<RangeSet()> RS,
     return RS();
 
   llvm::APSInt Min = AdjustmentType.getMinValue();
-  llvm::APSInt Lower = Min - Adjustment;
-  llvm::APSInt Upper = ComparisonVal - Adjustment;
+
+  llvm::APSInt Lower;
+  llvm::APSInt Upper;
+  switch(this->OperationOpcode) {
+    case clang::BO_Mul:
+      if(Adjustment > 0) {
+        // Calculate potential Overflow
+        Upper = ComparisonVal/Adjustment;
+        Lower = Max/Adjustment + 1;
+      } else {
+        Lower = ComparisonVal/Adjustment;
+        Upper = Min/Adjustment;
+      }
+      break;
+    case clang::BO_Shl:
+      if(Adjustment.isStrictlyPositive()) {
+        auto e = static_cast<const llvm::APInt>(Adjustment);
+        Upper = ComparisonVal >> e;
+        Lower = (Max >> e) + 1;
+      } else {
+        DefaultCase(Lower, Upper, Adjustment, Min, ComparisonVal);
+      }
+      break;
+    case clang::BO_Shr:
+      // The case where Adjustment == 0 has already been treated earlier on.
+      if(Adjustment.isStrictlyPositive()) {
+        Lower = Min;
+        auto e = static_cast<const llvm::APInt>(Adjustment);
+        Upper = ComparisonVal << e;
+      } else {
+        // This is undefined behavior
+        // Call the default case instead
+        DefaultCase(Lower, Upper, Adjustment, Min, ComparisonVal);
+      }
+      break;
+    case clang::BO_Div: {
+      if(Adjustment > 0) {
+        // Calculate potential Overflow
+        Upper = getOverflowMul(Adjustment, ComparisonVal, Min, Max);
+        Lower = Max;
+      } else {
+        Lower = getOverflowMul(Adjustment, ComparisonVal, Min, Max);
+        Upper = Min;
+      }
+    } break;
+    case clang::BO_Add:
+    case clang::BO_Sub:
+    default:
+      DefaultCase(Lower, Upper, Adjustment, Min, ComparisonVal);
+  }
 
   RangeSet Default = RS();
   return F.intersect(Default, Lower, Upper);

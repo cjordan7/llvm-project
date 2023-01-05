@@ -137,7 +137,28 @@ public:
   APSInt operator>>(unsigned Amt) const {
     return IsUnsigned ? APSInt(lshr(Amt), true) : APSInt(ashr(Amt), false);
   }
+
   APSInt& operator>>=(unsigned Amt) {
+    if (IsUnsigned)
+      lshrInPlace(Amt);
+    else
+      ashrInPlace(Amt);
+    return *this;
+  }
+
+  APSInt operator>>(const APInt &Amt) const {
+    APSInt e;
+    e = IsUnsigned ? lshr(Amt) : ashr(Amt);
+    return e;
+  }
+
+  APSInt operator<<(const APInt &Amt) const {
+    APSInt e;
+    e = shl(Amt);
+    return e;
+  }
+
+  APSInt& operator>>=(const APInt &Amt) {
     if (IsUnsigned)
       lshrInPlace(Amt);
     else
